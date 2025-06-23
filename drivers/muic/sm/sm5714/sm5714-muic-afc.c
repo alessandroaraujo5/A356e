@@ -165,6 +165,7 @@ int muic_check_fled_state(int enable, int mode)
 	if ((muic_data->fled_torch_enable == false) &&
 			(muic_data->fled_flash_enable == false)) {
 		if ((mode == FLED_MODE_TORCH) && (enable == false)) {
+			muic_afc_request_cause_clear_bit(FLED);
 			cancel_delayed_work(&muic_data->afc_torch_work);
 			schedule_delayed_work(&muic_data->afc_torch_work,
 					msecs_to_jiffies(5000));
@@ -172,7 +173,6 @@ int muic_check_fled_state(int enable, int mode)
 					MUIC_DEV_NAME, __func__);
 		} else {
 			muic_afc_request_voltage(FLED, 9);  /* 5V -> 9V(12V) */
-
 		}
 	}
 

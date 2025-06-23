@@ -244,7 +244,7 @@ int sensor_gn8_cis_init(struct v4l2_subdev *subdev)
 
 	sensor_gn8_mode_groups[SENSOR_GN8_MODE_DEFAULT] = MODE_GROUP_NONE;
 	sensor_gn8_mode_groups[SENSOR_GN8_MODE_RMS_CROP] = MODE_GROUP_NONE;
-	firstBoot = 1;
+	firstBoot = 0;
 
 	cis->cis_data->sens_config_index_pre = SENSOR_GN8_MODE_MAX;
 	cis->cis_data->sens_config_index_cur = 0;
@@ -309,6 +309,8 @@ int sensor_gn8_cis_set_global_setting(struct v4l2_subdev *subdev)
 	ret = sensor_cis_write_registers_locked(subdev, priv->prepare_fcm); //prepare FCM settings from #5 sequence
 	if (ret < 0)
 		err("prepare_fcm fail!!");
+
+	firstBoot = 0;
 
 	info("[%s] prepare_fcm done\n", __func__);
 

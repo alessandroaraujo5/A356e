@@ -993,6 +993,32 @@
 				phandle = <0x83>;
 			};
 
+			sec-bootstat {
+
+				thermal-zones {
+
+					zone_big {
+						zone-name = "BIG";
+						display-name = "BIG";
+					};
+
+					zone_lit {
+						zone-name = "LITTLE";
+						display-name = "LIT";
+					};
+
+					zone_g3d {
+						zone-name = "G3D";
+						display-name = "G3D";
+					};
+
+					zone_isp {
+						zone-name = "ISP";
+						display-name = "ISP";
+					};
+				};
+			};
+
 			secgpio_dvs {
 				compatible = "samsung,s5e8835-secgpio-dvs";
 				status = "okay";

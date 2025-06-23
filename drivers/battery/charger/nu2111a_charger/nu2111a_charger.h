@@ -18,7 +18,8 @@ enum {
 	PPS_VOL = 4,
 	PPS_CUR = 5,
 	VFLOAT = 6,
-	IINCC = 7
+	IINCC = 7,
+	DCERR_REASON = 8,
 };
 
 ssize_t nu2111a_chg_show_attrs(struct device *dev,
@@ -311,7 +312,7 @@ ssize_t nu2111a_chg_store_attrs(struct device *dev,
 /* i2c regmap init setting */
 #define NU2111A_REG_MAX         0x34
 #define NU2111A_I2C_NAME "nu2111a"
-#define NU2111A_MODULE_VERSION "T7.21"
+#define NU2111A_MODULE_VERSION "J7.37"
 
 #define CONFIG_PASS_THROUGH
 
@@ -340,6 +341,8 @@ ssize_t nu2111a_chg_store_attrs(struct device *dev,
 #else
 #define NU2111A_TA_VOL_STEP_ADJ_CC           40000           //40mV
 #endif
+
+#define NU2111A_TA_VOL_MIN_DCERR           9200           //9200mV
 
 //IIN_REG_TH (A) = 1A + DEC (5:0) * 100mA
 #define NU2111A_IIN_TO_HEX(__iin)            ((__iin - 500000)/100000)
@@ -414,7 +417,9 @@ ssize_t nu2111a_chg_store_attrs(struct device *dev,
 #define NU2111A_PDMSG_WAIT_T	                200// 200ms
 
 /* Delay Time for WDT */
-#define NU2111A_BATT_WDT_CONTROL_T           30000//30S
+#define NU2111A_BATT_WDT_CONTROL_T           30000 //30S
+#define NU2111A_BATT_WDT_WAIT_5_T           7000 //7S
+#define NU2111A_BATT_WDT_WAIT_30_T           35000 //35S
 
 /* Battery Threshold*/
 #define NU2111A_DC_VBAT_MIN                  340000//3.4V
@@ -477,18 +482,14 @@ enum {
 
 /* Switching Frequency */
 enum {
-	FSW_CFG_500KHZ = 0,
-	FSW_CFG_600KHZ,
-	FSW_CFG_700KHZ,
+	FSW_CFG_300KHZ = 0,
+	FSW_CFG_400KHZ,
+	FSW_CFG_500KHZ,
+	FSW_CFG_615KHZ,
+	FSW_CFG_730KHZ,
 	FSW_CFG_800KHZ,
-	FSW_CFG_900KHZ,
+	FSW_CFG_890KHZ,
 	FSW_CFG_1000KHZ,
-	FSW_CFG_1100KHZ,
-	FSW_CFG_1200KHZ,
-	FSW_CFG_1300KHZ,
-	FSW_CFG_1400KHZ,
-	FSW_CFG_1500KHZ,
-	FSW_CFG_1600KHZ,
 };
 
 /* Watchdong Timer */
@@ -598,6 +599,29 @@ enum {
 	DEV_STATE_ACTIVE,
 };
 
+/* DCERR REASON */
+enum {
+	VIN_UVLO = 0x400001,
+	VIN_OVP = 0x400002,
+	VOUT_OVP = 0x400003,
+	VOUT_UVLO = 0x400004,
+	VBAT_OVP = 0x400005,
+	IBUS_OCP = 0x400006,
+	IBUS_UCP = 0x400007,
+	IBAT_OCP = 0x400008,
+	THERMAL_SHUTDOWN = 0x40001C,
+	WDT_TIMER = 0x40001D,
+	NTC_FLT = 0x40001F,
+	MID2VOUT_UVP = 0x400022,
+	MID2VOUT_OVP = 0x400023,
+	VDSQRB_OVP = 0x400024,
+	SS_TIMEOUT = 0x400028,
+	PIN_DIAG_FAIL = 0x400029,
+	POWER_NG = 0x40002A,
+	VBUS_ERR_HI = 0x400036,
+	VBUS_ERR_LOW = 0x400037,
+};
+
 /*REGMAP CONFIG */
 static const struct regmap_config nu2111a_regmap_config = {
 	.reg_bits = 8,
@@ -619,6 +643,7 @@ struct nu2111a_platform_data {
 	unsigned int vbat_reg_max;
 	unsigned int ntc_th;
 	unsigned int wd_tmr;
+	unsigned int sw_freq;
 	bool wd_dis;
 
 #if IS_ENABLED(CONFIG_BATTERY_SAMSUNG)
@@ -677,7 +702,10 @@ struct nu2111a_charger {
 	unsigned int ta_vol;
 	unsigned int ta_objpos;
 	unsigned int ta_target_vol;
+	unsigned int ta_adjust_vol;
 	unsigned int ta_v_ofs;
+	unsigned int ta_v_ofs_thermal;
+	unsigned int ta_v_ofs_normal;
 	unsigned int vbus_ovp_th;
 	unsigned int ta_v_offset;
 	unsigned int ta_c_offset;
@@ -708,6 +736,11 @@ struct nu2111a_charger {
 
 	bool online;
 	int retry_cnt;
+	int active_retry_cnt;
+	int dcerr_ta_max_vol;
+	int dcerr_retry_cnt;
+	unsigned int dcerr_reason;
+	int wdt_test_resume;
 
 #if IS_ENABLED(CONFIG_BATTERY_SAMSUNG)
 	bool wdt_kick;

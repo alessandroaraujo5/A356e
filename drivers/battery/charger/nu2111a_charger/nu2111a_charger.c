@@ -25,6 +25,9 @@
 #include "../../common/sec_direct_charger.h"
 #endif
 #include "nu2111a_charger.h"
+#if IS_ENABLED(CONFIG_SEC_ABC)
+#include <linux/sti/abc_common.h>
+#endif
 
 #if defined(CONFIG_OF)
 #include <linux/of_gpio.h>
@@ -47,6 +50,7 @@ static struct device_attribute nu2111a_charger_attrs[] = {
 	NU2111A_CHARGER_ATTR(pps_cur),
 	NU2111A_CHARGER_ATTR(vfloat),
 	NU2111A_CHARGER_ATTR(iincc),
+	NU2111A_CHARGER_ATTR(dcerr_reason),
 };
 
 static int nu2111a_set_charging_state(struct nu2111a_charger *chg, unsigned int charging_state)
@@ -101,11 +105,19 @@ static int nu2111a_read_reg(struct nu2111a_charger *nuvolta, int reg, void *valu
 	int ret = 0;
 
 	mutex_lock(&nuvolta->i2c_lock);
-	ret = regmap_read(nuvolta->regmap, reg, value);
+	if (nuvolta->client->addr == 0x6e)
+		ret = regmap_read(nuvolta->regmap, reg, value);
+	else
+		ret = -EINVAL;
 	mutex_unlock(&nuvolta->i2c_lock);
 
-	if (ret < 0)
+	if (ret < 0) {
 		pr_info("%s: reg(0x%x), ret(%d)\n", __func__, reg, ret);
+#if IS_ENABLED(CONFIG_SEC_ABC) && !defined(CONFIG_SEC_FACTORY)
+		if (nuvolta->client->addr == 0x6e)
+			sec_abc_send_event("MODULE=battery@WARN=dc_i2c_fail");
+#endif
+	}
 	return ret;
 }
 
@@ -114,11 +126,19 @@ static int nu2111a_bulk_read_reg(struct nu2111a_charger *chg, int reg, void *val
 	int ret = 0;
 
 	mutex_lock(&chg->i2c_lock);
-	ret = regmap_bulk_read(chg->regmap, reg, val, count);
+	if (chg->client->addr == 0x6e)
+		ret = regmap_bulk_read(chg->regmap, reg, val, count);
+	else
+		ret = -EINVAL;
 	mutex_unlock(&chg->i2c_lock);
 
-	if (ret < 0)
+	if (ret < 0) {
 		pr_info("%s: reg(0x%x), ret(%d)\n", __func__, reg, ret);
+#if IS_ENABLED(CONFIG_SEC_ABC) && !defined(CONFIG_SEC_FACTORY)
+		if (chg->client->addr == 0x6e)
+			sec_abc_send_event("MODULE=battery@WARN=dc_i2c_fail");
+#endif
+	}
 	return ret;
 }
 
@@ -127,11 +147,19 @@ static int nu2111a_write_reg(struct nu2111a_charger *nuvolta, int reg, u8 value)
 	int ret = 0;
 
 	mutex_lock(&nuvolta->i2c_lock);
-	ret = regmap_write(nuvolta->regmap, reg, value);
+	if (nuvolta->client->addr == 0x6e)
+		ret = regmap_write(nuvolta->regmap, reg, value);
+	else
+		ret = -EINVAL;
 	mutex_unlock(&nuvolta->i2c_lock);
 
-	if (ret < 0)
+	if (ret < 0) {
 		pr_info("%s: reg(0x%x), ret(%d)\n", __func__, reg, ret);
+#if IS_ENABLED(CONFIG_SEC_ABC) && !defined(CONFIG_SEC_FACTORY)
+		if (nuvolta->client->addr == 0x6e)
+			sec_abc_send_event("MODULE=battery@WARN=dc_i2c_fail");
+#endif
+	}
 	return ret;
 }
 
@@ -187,9 +215,16 @@ static int nu2111a_parse_dt(struct device *dev, struct nu2111a_platform_data *pd
 	rc = of_property_read_u32(np, "nu2111a,wd-tmr", &pdata->wd_tmr);
 	if (rc) {
 		pr_info("%s: failed to get wd_tmr from dtsi", __func__);
-		pdata->wd_tmr = WD_TMR_30S;
+		pdata->wd_tmr = WD_TMR_5S;
 	}
 	pr_info("%s:: wd-tmr[0x%x]", __func__, pdata->wd_tmr);
+
+	rc = of_property_read_u32(np, "nu2111a,sw-freq", &pdata->sw_freq);
+	if (rc) {
+		pr_info("%s: failed to get sw-freq from dtsi", __func__);
+		pdata->sw_freq = FSW_CFG_730KHZ;
+	}
+	pr_info("%s:: sw-freq[0x%x]", __func__, pdata->sw_freq);
 
 	pdata->wd_dis = of_property_read_bool(np, "nu2111a,wd-dis");
 	pr_info("%s: wd-dis[%d]\n", __func__, pdata->wd_dis);
@@ -237,7 +272,7 @@ static int nu2111a_parse_dt(struct device *dev, struct nu2111a_platform_data *pd
 
 #if IS_ENABLED(CONFIG_BATTERY_SAMSUNG)
 char *charging_state_str[] = {
-	"NOT_CHARGING", "CHECK_VBAT", "PRESET_DC", "CHECK_ACTIVE", "ADJUST_CC",
+	"NO_CHARGING", "CHECK_VBAT", "PRESET_DC", "CHECK_ACTIVE", "ADJUST_CC",
 	"START_CC", "CC_MODE", "CV_MODE", "CHARGING_DONE", "ADJUST_TAVOL",
 	"ADJUST_TACUR"
 #ifdef CONFIG_PASS_THROUGH
@@ -526,11 +561,14 @@ static void nu2111a_check_wdt_control(struct nu2111a_charger *chg)
 
 	if (chg->wdt_kick) {
 		nu2111a_set_wdt_time(chg, chg->pdata->wd_tmr);
+		chg->wdt_test_resume = 0;
 		schedule_delayed_work(&chg->wdt_control_work, msecs_to_jiffies(NU2111A_BATT_WDT_CONTROL_T));
 	} else {
 		nu2111a_set_wdt_time(chg, chg->pdata->wd_tmr);
-		if (client->addr == 0xff)
+		if (client->addr == 0xff) {
 			client->addr = 0x6e;
+			i2c_mark_adapter_resumed(client->adapter);
+		}
 	}
 }
 
@@ -615,6 +653,8 @@ static int nu2111a_stop_charging(struct nu2111a_charger *chg)
 		LOG_DBG(chg, "charging_state--> Not Charging\n");
 		cancel_delayed_work(&chg->timer_work);
 		cancel_delayed_work(&chg->pps_work);
+		if (!chg->wdt_test_resume)
+			cancel_delayed_work(&chg->wdt_control_work);
 #ifdef NU2111A_STEP_CHARGING
 		cancel_delayed_work(&chg->step_work);
 		chg->current_step = STEP_DIS;
@@ -631,6 +671,8 @@ static int nu2111a_stop_charging(struct nu2111a_charger *chg)
 		chg->ret_state = DC_STATE_NOT_CHARGING;
 		chg->ta_target_vol = NU2111A_TA_MAX_VOL;
 		chg->ta_v_ofs = 0;
+		chg->ta_v_ofs_thermal = 0;
+		chg->ta_v_ofs_normal = 0;
 		chg->prev_iin = 0;
 		chg->prev_dec = false;
 		chg->prev_inc = INC_NONE;
@@ -649,6 +691,7 @@ static int nu2111a_stop_charging(struct nu2111a_charger *chg)
 		chg->tp_set = 0;
 		chg->vbus_ovp_th = NU2111A_VBUS_OVP_TH;
 		chg->retry_cnt = 0;
+		chg->active_retry_cnt = 0;
 #ifdef CONFIG_PASS_THROUGH
 		chg->pdata->pass_through_mode = DC_NORMAL_MODE;
 		chg->pass_through_mode = DC_NORMAL_MODE;
@@ -791,7 +834,8 @@ static int nu2111a_device_init(struct nu2111a_charger *chg)
 	chg->req_new_vbat_reg = false;
 	mutex_unlock(&chg->lock);
 
-	ret = nu2111a_update_reg(chg, NU2111A_REG_CONTROL1, NU2111A_BITS_FSW_SET, (0x04<<0));//0x07=1000KHZ  0x04=700KHz
+	/* 0x07=1000KHZ  0x04=700KHz */
+	ret = nu2111a_update_reg(chg, NU2111A_REG_CONTROL1, NU2111A_BITS_FSW_SET, chg->pdata->sw_freq);
 	if (ret < 0)
 		goto I2C_FAIL;
 
@@ -809,6 +853,10 @@ static int nu2111a_device_init(struct nu2111a_charger *chg)
 	chg->ta_c_offset = NU2111A_IIN_CFG_RANGE_CC*2;
 	chg->iin_c_offset = NU2111A_IIN_CFG_OFFSET_CC;
 	chg->iin_high_count = 0;
+	chg->retry_cnt = 0;
+	chg->active_retry_cnt = 0;
+	chg->dcerr_retry_cnt = 0;
+	chg->dcerr_ta_max_vol = NU2111A_TA_VOL_MIN_DCERR*NU2111A_SEC_DENOM_U_M;
 #ifdef CONFIG_PASS_THROUGH
 	chg->pass_through_mode = DC_NORMAL_MODE;
 	chg->pdata->pass_through_mode = DC_NORMAL_MODE;
@@ -912,59 +960,129 @@ static int nu2111a_check_sts_reg(struct nu2111a_charger *chg)
 		LOG_DBG(chg, "0xe:[%x], 0xf:[%x], 0x10:[%x], 0x11:[%x], 0x12:[%x], 0x13:[%x], 0x14:[%x]\n",
 			r_state[0], r_state[1], r_state[2], r_state[3], r_state[4], r_state[5], r_state[6]);
 
+		nu2111a_get_adc_channel(chg, ADCCH_IIN);
+		nu2111a_get_adc_channel(chg, ADCCH_VIN);
+
 		LOG_DBG(chg, "NU2111A_REG_INT_STAT1 = 0x%02X\n", r_state[0]);
 
-		if (r_state[0] & NU2111A_BIT_VOUT_OVP_STAT)
+		if (r_state[0] & NU2111A_BIT_VOUT_OVP_STAT) {
+			chg->dcerr_reason = VOUT_OVP;
 			LOG_DBG(chg, "------ Vout OVP! --------\n");
+		}
 
-		if (r_state[0] & NU2111A_BIT_VBAT_OVP_STAT)
+		if (r_state[0] & NU2111A_BIT_VBAT_OVP_STAT) {
+			chg->dcerr_reason = VBAT_OVP;
 			LOG_DBG(chg, "------ Vbat OVP! --------\n");
+		}
 
-		if (r_state[0] & NU2111A_BIT_IBAT_OCP_STAT)
+		if (r_state[0] & NU2111A_BIT_IBAT_OCP_STAT) {
+			chg->dcerr_reason = IBAT_OCP;
 			LOG_DBG(chg, "------ Ibat OCP! --------\n");
+		}
 
-		if (r_state[0] & NU2111A_BIT_VBUS_OVP_STAT)
+		if (r_state[0] & NU2111A_BIT_VBUS_OVP_STAT) {
+			chg->dcerr_reason = VIN_OVP;
 			LOG_DBG(chg, "------ Vbus OVP! --------\n");
+		}
 
-		if (r_state[0] & NU2111A_BIT_IBUS_OCP_STAT)
+		if (r_state[0] & NU2111A_BIT_IBUS_OCP_STAT) {
+			chg->dcerr_reason = IBUS_OCP;
 			LOG_DBG(chg, "------ Ibus OCP! --------\n");
+		}
 
-		if (r_state[0] & NU2111A_BIT_IBUS_UCP_FALL_STAT)
+		if (r_state[0] & NU2111A_BIT_IBUS_UCP_FALL_STAT) {
+			chg->dcerr_reason = IBUS_UCP;
 			LOG_DBG(chg, "------ Ibus UCP falling! --------\n");
+		}
 
-		if (!(r_state[0] & NU2111A_BIT_ADAPTER_INSERT_STAT))
-			LOG_DBG(chg, "------ Adapter Not Present!--------\n");
+		if (!(r_state[0] & NU2111A_BIT_ADAPTER_INSERT_STAT) || chg->adc_vin < NU2111A_TA_MIN_VOL_PRESET) {
+			chg->dcerr_reason = VIN_UVLO;
+			if (chg->prev_iin > NU2111A_IIN_CFG_DFT && chg->dcerr_retry_cnt < 3) {
+				chg->dcerr_retry_cnt++;
+			}
+			LOG_DBG(chg, "------ Adapter Not Present[%d] prev_iin [%d]!--------\n", chg->dcerr_retry_cnt, chg->prev_iin);
+			nu2111a_read_adc(chg);
+			ret = -EINVAL;
 
-		if (!(r_state[0] & NU2111A_BIT_VBAT_INSERT_STAT))
+			goto Err;
+		}
+
+		if (!(r_state[0] & NU2111A_BIT_VBAT_INSERT_STAT)) {
+			chg->dcerr_reason = VOUT_UVLO;
 			LOG_DBG(chg, "------ Vout UVLO!--------\n");
+		}
 
 		LOG_DBG(chg, "NU2111A_REG_INT_STAT2 = 0x%02X\n", r_state[1]);
 
-		if (r_state[1] & NU2111A_BIT_TSD_STAT)
+		if (r_state[1] & NU2111A_BIT_TSD_STAT) {
+			chg->dcerr_reason = THERMAL_SHUTDOWN;
 			LOG_DBG(chg, "------ Thermal Shutdown! --------\n");
+		}
 
-		if (r_state[1] & NU2111A_BIT_NTC_FLT_STAT)
+		if (r_state[1] & NU2111A_BIT_NTC_FLT_STAT) {
+			chg->dcerr_reason = NTC_FLT;
 			LOG_DBG(chg, "------ NTC Falling! --------\n");
+		}
 
-		if (r_state[1] & NU2111A_BIT_PMID2VOUT_OVP_STAT)
+		if (r_state[1] & NU2111A_BIT_PMID2VOUT_OVP_STAT) {
+			chg->dcerr_reason = MID2VOUT_OVP;
 			LOG_DBG(chg, "------ PMID/2-VOUT OV! --------\n");
+		}
 
-		if (r_state[1] & NU2111A_BIT_PMID2VOUT_UVP_STAT)
+		if (r_state[1] & NU2111A_BIT_PMID2VOUT_UVP_STAT) {
+			chg->dcerr_reason = MID2VOUT_UVP;
 			LOG_DBG(chg, "------ PMID/2-VOUT UV! --------\n");
+		}
 
-		if (r_state[1] & NU2111A_BIT_VBUS_ERRORHI_STAT)
+		if (r_state[1] & NU2111A_BIT_VBUS_ERRORHI_STAT) {
+			chg->dcerr_reason = VBUS_ERR_HI;
 			LOG_DBG(chg, "------ Vbus too high! --------\n");
+		}
 
-		if (r_state[1] & NU2111A_BIT_VBUS_ERRORLO_STAT)
+		if (r_state[1] & NU2111A_BIT_VBUS_ERRORLO_STAT) {
+			chg->dcerr_reason = VBUS_ERR_LOW;
 			LOG_DBG(chg, "------ Vbus too low! --------\n");
+		}
 
-		if (r_state[1] & NU2111A_BIT_VDRP_OVP_STAT)
+		if (r_state[1] & NU2111A_BIT_VDRP_OVP_STAT) {
+			chg->dcerr_reason = VDSQRB_OVP;
 			LOG_DBG(chg, "------ VDRP OVP status not valid!--------\n");
+		}
 
-		if (r_state[1] & NU2111A_BIT_VAC_OVP_STAT)
+		if (r_state[1] & NU2111A_BIT_VAC_OVP_STAT) {
+			chg->dcerr_reason = VIN_OVP;
 			LOG_DBG(chg, "------ AC OVP status not valid!--------\n");
+		}
+
+		LOG_DBG(chg, "NU2111A_REG_INT_FLAG1 = 0x%02X\n", r_state[3]);
+
+		if (r_state[3] & NU2111A_BIT_VOUT_OVP_FLAG) {
+			chg->dcerr_reason = VOUT_OVP;
+			LOG_DBG(chg, "------ VOUT OVP FLAG!--------\n");
+		}
+
+		if (r_state[3] & NU2111A_BIT_VBAT_OVP_FLAG) {
+			chg->dcerr_reason = VBAT_OVP;
+			LOG_DBG(chg, "------ VBAT OVP FLAG!--------\n");
+		}
+
+		if (r_state[3] & NU2111A_BIT_IBAT_OCP_FLAG) {
+			chg->dcerr_reason = IBAT_OCP;
+			LOG_DBG(chg, "------ IBAT OCP FLAG!--------\n");
+		}
+
+		if (r_state[3] & NU2111A_BIT_VBUS_OVP_FLAG) {
+			chg->dcerr_reason = VIN_OVP;
+			LOG_DBG(chg, "------ VIN OVP FLAG!--------\n");
+		}
+
+		if (r_state[3] & NU2111A_BIT_IBUS_OCP_FLAG) {
+			chg->dcerr_reason = IBUS_OCP;
+			LOG_DBG(chg, "------IBUS OCP FLAG!--------\n");
+		}
 
 		if (r_state[3] & NU2111A_BIT_IBUS_UCP_FALL_FLAG) {
+			chg->dcerr_reason = IBUS_UCP;
 			LOG_DBG(chg, "------ IBUS UCP FALL FLAG[%d]!--------\n", chg->retry_cnt);
 			if (chg->retry_cnt > 3)
 				chg->retry_cnt = 0;
@@ -972,28 +1090,83 @@ static int nu2111a_check_sts_reg(struct nu2111a_charger *chg)
 				chg->retry_cnt++;
 		}
 
+		LOG_DBG(chg, "NU2111A_REG_INT_FLAG2 = 0x%02X\n", r_state[4]);
+
+
+		if (r_state[4] & NU2111A_BIT_TSD_FLAG) {
+			chg->dcerr_reason = THERMAL_SHUTDOWN;
+			LOG_DBG(chg, "------ THERMAL SHUTDOWN FLAG!--------\n");
+		}
+
+		if (r_state[4] & NU2111A_BIT_NTC_FLT_FLAG) {
+			chg->dcerr_reason = NTC_FLT;
+			LOG_DBG(chg, "------ NTC FLT FLAG!--------\n");
+		}
+
+		if (r_state[4] & NU2111A_BIT_PMID2VOUT_OVP_FLAG) {
+			chg->dcerr_reason = MID2VOUT_OVP;
+			LOG_DBG(chg, "------ MID2VOUT OVP FLAG!--------\n");
+		}
+
+		if (r_state[4] & NU2111A_BIT_PMID2VOUT_UVP_FLAG) {
+			chg->dcerr_reason = MID2VOUT_UVP;
+			LOG_DBG(chg, "------ PMID2VOUT UVP FLAG!--------\n");
+		}
+
+		if (r_state[4] & NU2111A_BIT_VBUS_ERRORHI_FLAG) {
+			chg->dcerr_reason = VBUS_ERR_HI;
+			LOG_DBG(chg, "------ VBUS ERRORHI FLAG!--------\n");
+		}
+
+		if (r_state[4] & NU2111A_BIT_VBUS_ERRORLO_FLAG) {
+			chg->dcerr_reason = VBUS_ERR_LOW;
+			LOG_DBG(chg, "------ VBUS ERRORLO FLAG!--------\n");
+		}
+
+		if (r_state[4] & NU2111A_BIT_VDRP_OVP_FLAG) {
+			chg->dcerr_reason = VDSQRB_OVP;
+			LOG_DBG(chg, "------ VDRP OVP FLAG!--------\n");
+		}
+
+		if (r_state[4] & NU2111A_BIT_VAC_OVP_FLAG) {
+			chg->dcerr_reason = VIN_OVP;
+			LOG_DBG(chg, "------ VAC OVP FLAG!--------\n");
+		}
+
 		LOG_DBG(chg, "NU2111A_REG_INT_FLAG4 = 0x%02X\n", r_state[6]);
 
-		if (r_state[6] & NU2111A_BIT_VOUT_PRES_FALL_FLAG)
+		if (r_state[6] & NU2111A_BIT_VOUT_PRES_FALL_FLAG) {
+			chg->dcerr_reason = VOUT_UVLO;
 			LOG_DBG(chg, "------ VOUT Presence fall --------\n");
+		}
 
-		if (r_state[6] & NU2111A_BIT_VBUS_PRES_FALL_FLAG)
+		if (r_state[6] & NU2111A_BIT_VBUS_PRES_FALL_FLAG) {
+			chg->dcerr_reason = VIN_UVLO;
 			LOG_DBG(chg, "------ VBUS Presence fall --------\n");
+		}
 
-		if (r_state[6] & NU2111A_BIT_POWER_NG_FLAG)
+		if (r_state[6] & NU2111A_BIT_POWER_NG_FLAG) {
+			chg->dcerr_reason = POWER_NG;
 			LOG_DBG(chg, "------ Power NG --------\n");
+		}
 
-		if (r_state[6] & NU2111A_BIT_WD_TIMEOUT_FLAG)
+		if (r_state[6] & NU2111A_BIT_WD_TIMEOUT_FLAG) {
+			chg->dcerr_reason = WDT_TIMER;
 			LOG_DBG(chg, "------ Watchdog Timeout --------\n");
+		}
 
-		if (r_state[6] & NU2111A_BIT_SS_TIMEOUT_FLAG)
+		if (r_state[6] & NU2111A_BIT_SS_TIMEOUT_FLAG) {
+			chg->dcerr_reason = SS_TIMEOUT;
 			LOG_DBG(chg, "------ Soft-Start Timeout--------\n");
+		}
 
 		if (r_state[6] & NU2111A_BIT_REG_TIMEOUT_FLAG)
 			LOG_DBG(chg, "------ Loop Regulation Timeout--------\n");
 
-		if (r_state[6] & NU2111A_BIT_REG_TIMEOUT_FLAG)
+		if (r_state[6] & NU2111A_BIT_PIN_DIAG_FAIL_FLAG) {
+			chg->dcerr_reason = PIN_DIAG_FAIL;
 			LOG_DBG(chg, "------ Pin Diagnostic Fall--------\n");
+		}
 
 		nu2111a_read_adc(chg);
 
@@ -1104,16 +1277,32 @@ static void nu2111a_wdt_control_work(struct work_struct *work)
 	struct device *dev = chg->dev;
 	struct i2c_client *client = container_of(dev, struct i2c_client, dev);
 
-	nu2111a_set_wdt_time(chg, WD_TMR_30S);
+	if (!chg->wdt_test_resume) {
+		nu2111a_set_wdt_time(chg, chg->pdata->wd_tmr);
 
-	/* For kick Watchdog */
-	nu2111a_get_adc_channel(chg, ADCCH_VBAT);
-	nu2111a_send_pd_message(chg, PD_MSG_REQUEST_APDO);
+		/* For kick Watchdog */
+		nu2111a_read_adc(chg);
+		nu2111a_show_reg(chg);
 
-	client->addr = 0xff;
+		client->addr = 0xff;
+		i2c_mark_adapter_suspended(client->adapter);
 
-	pr_info("%s: disable addr (vin:%duV, iin:%duA)\n",
-		__func__, chg->adc_vin, chg->adc_iin);
+		pr_info("%s: disable addr (vin:%duV, iin:%duA)\n",
+			__func__, chg->adc_vin, chg->adc_iin);
+
+		chg->wdt_test_resume = 1;
+
+		if (chg->pdata->wd_tmr < WD_TMR_30S) {
+			pr_info("%s: resume i2c bus after wdt timeout 7sec", __func__);
+			schedule_delayed_work(&chg->wdt_control_work, msecs_to_jiffies(NU2111A_BATT_WDT_WAIT_5_T));
+		} else {
+			pr_info("%s: resume i2c bus after wdt timeout 35sec", __func__);
+			schedule_delayed_work(&chg->wdt_control_work, msecs_to_jiffies(NU2111A_BATT_WDT_WAIT_30_T));
+		}
+	} else {
+		pr_info("%s: resume i2c bus", __func__);
+		i2c_mark_adapter_resumed(chg->client->adapter);
+	}
 }
 
 #ifdef NU2111A_STEP_CHARGING
@@ -1424,7 +1613,9 @@ static int nu2111a_adjust_ta_current(struct nu2111a_charger *chg)
 		chg->timer_period = 1000;
 		mutex_unlock(&chg->lock);
 	} else {
-		if (chg->iin_cc > chg->pdata->iin_cfg) {
+		if (chg->iin_cc > chg->pdata->iin_cfg ||
+			(chg->ret_state == DC_STATE_CV_MODE &&
+			chg->iin_cc > chg->ta_cur)) {
 			/* New IIN is higher than iin_cfg */
 			chg->pdata->iin_cfg = chg->iin_cc;
 			/* set IIN_CFG to new IIN */
@@ -1476,14 +1667,22 @@ static int nu2111a_adjust_ta_current(struct nu2111a_charger *chg)
 		} else {
 			LOG_DBG(chg, "iin_cc < iin_cfg\n");
 
+			if (chg->iin_cc < chg->ta_cur) {
+				chg->ta_v_ofs = chg->ta_v_ofs_thermal;
+				chg->ta_vol = chg->adc_vbat*2 + chg->ta_v_ofs;
+				LOG_DBG(chg, "ta_v_ofs=%d, ta_cur=%d, ta_vol=%d, iin_cc=%d\n",
+				chg->ta_v_ofs, chg->ta_cur, chg->ta_vol, chg->iin_cc);
+			} else {
+				chg->ta_v_ofs = chg->ta_v_ofs_normal;
+				chg->ta_vol = chg->adc_vbat*2 + chg->ta_v_ofs;
+				LOG_DBG(chg, "ta_v_ofs=%d, ta_cur=%d, ta_vol=%d, iin_cc=%d\n",
+				chg->ta_v_ofs, chg->ta_cur, chg->ta_vol, chg->iin_cc);
+			}
+
 			/* set ta-cur to IIN_CC */
 			val = chg->iin_cc / PD_MSG_TA_CUR_STEP;
 			chg->iin_cc = val * PD_MSG_TA_CUR_STEP;
 			chg->ta_cur = chg->iin_cc;
-
-			chg->ta_vol = chg->ta_target_vol;
-			LOG_DBG(chg, "ta_max_vol=%d, ta_cur=%d, ta_vol=%d, iin_cc=%d\n",
-			chg->ta_max_vol, chg->ta_cur, chg->ta_vol, chg->iin_cc);
 
 			/* pd msg */
 			mutex_lock(&chg->lock);
@@ -1722,8 +1921,6 @@ static int nu2111a_set_pass_through_mode(struct nu2111a_charger *chg)
 				NU2111A_BIT_IBUS_UCP_DIS, NU2111A_BIT_IBUS_UCP_DIS);
 			if (ret < 0)
 				goto error;
-			ret = nu2111a_update_reg(chg, NU2111A_REG_CONTROL1,
-				NU2111A_BITS_FSW_SET, (0x04<<0));
 
 			LOG_DBG(chg, "PT mode=%d\n",
 					chg->pass_through_mode);
@@ -1738,14 +1935,9 @@ static int nu2111a_set_pass_through_mode(struct nu2111a_charger *chg)
 			chg->req_pt_mode = false;
 			mutex_unlock(&chg->lock);
 
-#if IS_ENABLED(CONFIG_BATTERY_SAMSUNG)
-			nu2111a_set_charging_state(chg, DC_STATE_PT_MODE);
-#else
-			chg->charging_state = DC_STATE_PT_MODE;
-#endif
 			mutex_lock(&chg->lock);
 			chg->timer_id = TIMER_CHECK_PTMODE;
-			chg->timer_period = NU2111A_PT_ACTIVE_DELAY_T;
+			chg->timer_period = NU2111A_CHECK_ACTIVE_DELAY_T;
 			mutex_unlock(&chg->lock);
 			schedule_delayed_work(&chg->timer_work, msecs_to_jiffies(chg->timer_period));
 		} else {
@@ -1945,7 +2137,7 @@ static int nu2111a_preset_dcmode(struct nu2111a_charger *chg)
 	int ret = 0;
 	unsigned int val;
 
-	LOG_DBG(chg, "Start!\n");
+	LOG_DBG(chg, "Start! dcerrcnt : %d\n", chg->dcerr_retry_cnt);
 
 	nu2111a_set_charging_state(chg, DC_STATE_PRESET_DC);
 
@@ -1978,7 +2170,13 @@ static int nu2111a_preset_dcmode(struct nu2111a_charger *chg)
 	val = chg->iin_cc / PD_MSG_TA_CUR_STEP;
 	chg->iin_cc = val * PD_MSG_TA_CUR_STEP;
 
-	val = (chg->ta_max_pwr/100)*POWL/(chg->iin_cc/1000);
+	if (chg->dcerr_retry_cnt > 1) {
+		val = chg->dcerr_ta_max_vol/1000 - 2*(NU2111A_TA_VOL_STEP_ADJ_CC/1000);
+		LOG_DBG(chg, "dcerr_ta_max_vol=%d, val=%d", chg->dcerr_ta_max_vol/1000, val);
+		val = MAX(val, NU2111A_TA_VOL_MIN_DCERR);
+	} else
+		val = (chg->ta_max_pwr/100)*POWL/(chg->iin_cc/1000);
+
 	val = (val * 1000) / PD_MSG_TA_VOL_STEP;
 	val = val * PD_MSG_TA_VOL_STEP;
 
@@ -2090,18 +2288,6 @@ static int nu2111a_start_dc_charging(struct nu2111a_charger *chg)
 			return ret;
 	}
 
-	if (chg->pdata->wd_dis) {
-		/* Disable WDT function */
-		nu2111a_enable_wdt(chg, WDT_DISABLED);
-	} else {
-		nu2111a_enable_wdt(chg, WDT_ENABLED);
-#if IS_ENABLED(CONFIG_BATTERY_SAMSUNG)
-		nu2111a_check_wdt_control(chg);
-#else
-		nu2111a_set_wdt_time(chg, chg->pdata->wd_tmr);
-#endif
-	}
-
 	nu2111a_enable_adc(chg, true);
 
 	__pm_stay_awake(chg->monitor_ws);
@@ -2119,6 +2305,18 @@ static int nu2111a_check_starting_vbat_level(struct nu2111a_charger *chg)
 	union power_supply_propval val;
 
 	nu2111a_set_charging_state(chg, DC_STATE_CHECK_VBAT);
+
+	if (chg->pdata->wd_dis) {
+		/* Disable WDT function */
+		nu2111a_enable_wdt(chg, WDT_DISABLED);
+	} else {
+		nu2111a_enable_wdt(chg, WDT_ENABLED);
+#if IS_ENABLED(CONFIG_BATTERY_SAMSUNG)
+		nu2111a_check_wdt_control(chg);
+#else
+		nu2111a_set_wdt_time(chg, chg->pdata->wd_tmr);
+#endif
+	}
 
 	ret = nu2111a_get_adc_channel(chg, ADCCH_VBAT);
 	if (ret < 0)
@@ -2177,10 +2375,16 @@ static int nu2111a_check_active_state(struct nu2111a_charger *chg)
 
 	nu2111a_set_charging_state(chg, DC_STATE_CHECK_ACTIVE);
 
-	nu2111a_check_sts_reg(chg);
+	ret = nu2111a_check_sts_reg(chg);
+	if (ret < 0) {
+		if (chg->active_retry_cnt > 10)
+			goto Err;
+		chg->active_retry_cnt++;
+	}
 
 	if (chg->chg_state == DEV_STATE_ACTIVE) {
 		LOG_DBG(chg, " Active State\n");
+		chg->active_retry_cnt = 0;
 		ret = nu2111a_write_reg(chg, NU2111A_REG_PMID2VOUT_OVP_UVP, 0x12);
 
 		mutex_lock(&chg->lock);
@@ -2204,7 +2408,18 @@ static int nu2111a_check_active_state(struct nu2111a_charger *chg)
 		LOG_DBG(chg, "invalid charging state=%d\n", chg->chg_state);
 		ret = -EINVAL;
 	}
-
+Err:
+	if (ret < 0) {
+		LOG_DBG(chg, "Retry %d DCERR:0x%x\n", chg->retry_cnt, chg->dcerr_reason);
+		if (chg->retry_cnt > 0 && !chg->active_retry_cnt) {
+			mutex_lock(&chg->lock);
+			chg->timer_id = TIMER_VBATMIN_CHECK;
+			chg->timer_period = 100;
+			mutex_unlock(&chg->lock);
+			ret = 0;
+			schedule_delayed_work(&chg->timer_work, msecs_to_jiffies(chg->timer_period));
+		}
+	}
 	LOG_DBG(chg, "End!, ret = %d\n", ret);
 	return ret;
 }
@@ -2235,6 +2450,10 @@ static int nu2111a_adjust_ccmode(struct nu2111a_charger *chg)
 	vbat = chg->adc_vbat;
 	LOG_DBG(chg, "iin_target:[%d], ta-vol:[%d], ta-cur:[%d]", chg->iin_cc, chg->ta_vol, chg->ta_cur);
 	LOG_DBG(chg, "IIN: [%d], VBAT: [%d]\n", iin, vbat);
+	if (chg->adc_iin < (NU2111A_IIN_CFG_DFT - NU2111A_TA_C_OFFSET)) {
+		chg->ta_v_ofs_thermal = (chg->ta_vol - (2 * vbat)) + chg->ta_v_offset;
+		LOG_DBG(chg, "IIN: [%d], VBAT: [%d], V_OFFSET: [%d]\n", iin, vbat, chg->ta_v_ofs_thermal);
+	}
 
 	if (vbat >= chg->pdata->vbat_reg) {
 		chg->ta_target_vol = chg->ta_vol;
@@ -2258,6 +2477,7 @@ static int nu2111a_adjust_ccmode(struct nu2111a_charger *chg)
 			chg->ta_v_ofs = (chg->ta_vol - (2 * vbat)) + chg->ta_v_offset;
 #else
 		chg->ta_v_ofs = (chg->ta_vol - (2 * vbat)) + chg->ta_v_offset;
+		chg->ta_v_ofs_normal = chg->ta_v_ofs;
 #endif
 		val = (vbat * 2) + chg->ta_v_ofs;
 		val = val/PD_MSG_TA_VOL_STEP;
@@ -2320,7 +2540,6 @@ static int nu2111a_adjust_ccmode(struct nu2111a_charger *chg)
 						chg->timer_period = 0;
 						mutex_unlock(&chg->lock);
 						goto EXIT;
-
 					} else
 						goto ENTER_CC;
 				} else {
@@ -2375,10 +2594,17 @@ static int nu2111a_adjust_ccmode(struct nu2111a_charger *chg)
 								chg->ta_cur = chg->ta_cur + PD_MSG_TA_CUR_STEP;
 								if (chg->ta_cur > chg->ta_max_cur)
 									chg->ta_cur = chg->ta_max_cur;
-								val = (chg->ta_max_pwr/100)*POWL/(chg->ta_cur/1000);
+								if (chg->dcerr_retry_cnt > 1) {
+									val = chg->dcerr_ta_max_vol/1000 - 2*(NU2111A_TA_VOL_STEP_ADJ_CC/1000);
+									LOG_DBG(chg, "dcerr_ta_max_vol=%d, val=%d", chg->dcerr_ta_max_vol/1000, val);
+									val = MAX(val, NU2111A_TA_VOL_MIN_DCERR);
+								} else
+									val = (chg->ta_max_pwr/100)*POWL/(chg->ta_cur/1000);
+
 								val = (val * 1000) / PD_MSG_TA_VOL_STEP;
 								val = val * PD_MSG_TA_VOL_STEP;
 								chg->ta_max_vol = MIN(val, NU2111A_TA_MAX_VOL);
+
 								LOG_DBG(chg, "INC = TA_CUR!! ta_max_vol %d\n", chg->ta_max_vol);
 								chg->prev_inc = INC_TA_CUR;
 								//send pd msg
@@ -2405,6 +2631,7 @@ ENTER_CC:
 		}
 #else
 		chg->ta_v_ofs = (chg->ta_vol - (2 * vbat)) + chg->ta_v_offset;
+		chg->ta_v_ofs_normal = chg->ta_v_ofs;
 #endif
 		val = (vbat * 2) + chg->ta_v_ofs;
 		LOG_DBG(chg, "---1-----val:[%d]", val);
@@ -2471,14 +2698,19 @@ EXIT:
 	}
 error:
 	if (ret < 0) {
-		LOG_DBG(chg, "Retry %d\n", chg->retry_cnt);
-		if (chg->retry_cnt > 0) {
-			mutex_lock(&chg->lock);
-			chg->timer_id = TIMER_VBATMIN_CHECK;
-			chg->timer_period = 100;
-			mutex_unlock(&chg->lock);
-			ret = 0;
-			schedule_delayed_work(&chg->timer_work, msecs_to_jiffies(chg->timer_period));
+		LOG_DBG(chg, "Retry %d DCERR:0x%x\n", chg->retry_cnt, chg->dcerr_reason);
+		if (chg->dcerr_retry_cnt > 0) {
+			LOG_DBG(chg, "dcerr TA Vol=%d\n", chg->ta_vol);
+			chg->dcerr_ta_max_vol = chg->ta_vol;
+		} else {
+			if (chg->retry_cnt > 0) {
+				mutex_lock(&chg->lock);
+				chg->timer_id = TIMER_VBATMIN_CHECK;
+				chg->timer_period = 100;
+				mutex_unlock(&chg->lock);
+				ret = 0;
+				schedule_delayed_work(&chg->timer_work, msecs_to_jiffies(chg->timer_period));
+			}
 		}
 	}
 	LOG_DBG(chg, "End, ret=%d\n", ret);
@@ -2642,17 +2874,25 @@ static int nu2111a_ccmode_regulation_process(struct nu2111a_charger *chg)
 			}
 			/* if Power is higher than Max-Power, CC current can go lower than the target */
 			val = (new_ta_vol/1000) * (new_ta_cur/1000);
-			if (val > (chg->ta_max_pwr/100)*POWL) {
-				LOG_DBG(chg, "max power limit : new ta_vol[%d], new_ta_cur[%d], val[%d]\n"
-					, new_ta_vol, new_ta_cur, val);
-				chg->iin_cc -= PD_MSG_TA_CUR_STEP;
-				/* re-calculate */
-				val = (chg->ta_max_pwr/100)*POWL/(chg->iin_cc/1000);
-				val = val*1000/PD_MSG_TA_VOL_STEP;
-				val = val*PD_MSG_TA_VOL_STEP;
-				chg->ta_max_vol = MIN(val, chg->pdo_max_voltage*NU2111A_SEC_DENOM_U_M);
-				if (new_ta_cur > chg->iin_cc)
-					new_ta_cur = chg->iin_cc;
+
+			if (chg->dcerr_retry_cnt > 1) {
+				LOG_DBG(chg, "dcerr retrr ta max vol calculate again.\n");
+				LOG_DBG(chg, "new_ta_vol %d %d\n", new_ta_vol, chg->ta_max_vol);
+				if (new_ta_vol > chg->ta_max_vol)
+					new_ta_vol = chg->ta_max_vol;
+			} else {
+				if (val > (chg->ta_max_pwr/100)*POWL) {
+					LOG_DBG(chg, "max power limit : new ta_vol[%d], new_ta_cur[%d], val[%d]\n"
+						, new_ta_vol, new_ta_cur, val);
+					chg->iin_cc -= PD_MSG_TA_CUR_STEP;
+					/* re-calculate */
+					val = (chg->ta_max_pwr/100)*POWL/(chg->iin_cc/1000);
+					val = val*1000/PD_MSG_TA_VOL_STEP;
+					val = val*PD_MSG_TA_VOL_STEP;
+					chg->ta_max_vol = MIN(val, chg->pdo_max_voltage*NU2111A_SEC_DENOM_U_M);
+					if (new_ta_cur > chg->iin_cc)
+						new_ta_cur = chg->iin_cc;
+				}
 			}
 
 			if (chg->ab_ta_connected) {
@@ -3023,6 +3263,7 @@ static void nu2111a_timer_work(struct work_struct *work)
 		ret = nu2111a_pass_through_mode_process(chg);
 		if (ret < 0)
 			goto error;
+		break;
 #endif
 	default:
 		break;
@@ -3154,12 +3395,13 @@ static int nu2111a_psy_set_property(struct power_supply *psy, enum power_supply_
 
 	switch ((int)psp) {
 	case POWER_SUPPLY_PROP_ONLINE:
-		LOG_DBG(chg, "ONLINE:\r\n");
+		LOG_DBG(chg, "ONLINE: [%d]\r\n", chg->dcerr_retry_cnt);
 		if (chg->online) {
 			/* charger is enabled, need to stop charging!! */
 			if (!val->intval) {
 				chg->online = false;
 				ret = nu2111a_stop_charging(chg);
+				chg->dcerr_retry_cnt = 0;
 #if IS_ENABLED(CONFIG_BATTERY_SAMSUNG)
 				chg->health_status = POWER_SUPPLY_HEALTH_GOOD;
 #endif
@@ -3315,8 +3557,10 @@ static int nu2111a_psy_set_property(struct power_supply *psy, enum power_supply_
 		case POWER_SUPPLY_EXT_PROP_DIRECT_WDT_CONTROL:
 			if (val->intval) {
 				chg->wdt_kick = true;
+				chg->wdt_test_resume = 0;
 			} else {
 				chg->wdt_kick = false;
+				i2c_mark_adapter_resumed(chg->client->adapter);
 				cancel_delayed_work(&chg->wdt_control_work);
 			}
 			pr_info("%s: wdt kick (%d)\n", __func__, chg->wdt_kick);
@@ -3382,6 +3626,7 @@ static int nu2111a_psy_set_property(struct power_supply *psy, enum power_supply_
 					goto Err;
 				}
 #ifndef NU2111A_STEP_CHARGING
+				pm_wakeup_ws_event(chg->monitor_ws, 10000, false);
 				mutex_lock(&chg->lock);
 				chg->timer_id = TIMER_VBATMIN_CHECK;
 				chg->timer_period = NU2111A_VBATMIN_CHECK_T;
@@ -3495,6 +3740,7 @@ static int nu2111a_psy_get_property(struct power_supply *psy, enum power_supply_
 		break;
 #if IS_ENABLED(CONFIG_BATTERY_SAMSUNG)
 	case POWER_SUPPLY_PROP_HEALTH:
+		LOG_DBG(chg, "POWER_SUPPLY_PROP_HEALTH: [%d]\n", chg->health_status);
 		val->intval = chg->health_status;
 		break;
 
@@ -3767,6 +4013,9 @@ ssize_t nu2111a_chg_show_attrs(struct device *dev, struct device_attribute *attr
 		if (chg)
 			i += scnprintf(buf + i, PAGE_SIZE - i, "%d\n", chg->pdata->iin_cfg);
 		break;
+	case DCERR_REASON:
+		i += scnprintf(buf + i, PAGE_SIZE - i, "0x%x\n", chg->dcerr_reason);
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -3825,6 +4074,8 @@ ssize_t nu2111a_chg_store_attrs(struct device *dev, struct device_attribute *att
 //			if (chg)
 //				set_iin_cfg(chg, x);
 		ret = count;
+		break;
+	case DCERR_REASON:
 		break;
 	default:
 		ret = -EINVAL;
@@ -3987,7 +4238,11 @@ FAIL_DEBUGFS:
 	return ret;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
 static int nu2111a_charger_remove(struct i2c_client *client)
+#else
+static void nu2111a_charger_remove(struct i2c_client *client)
+#endif
 {
 	struct nu2111a_charger *chg = i2c_get_clientdata(client);
 
@@ -4003,7 +4258,9 @@ static int nu2111a_charger_remove(struct i2c_client *client)
 
 	kfree(chg);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
 	return 0;
+#endif
 }
 
 static void nu2111a_charger_shutdown(struct i2c_client *client)
