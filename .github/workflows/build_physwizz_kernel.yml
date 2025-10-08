@@ -16,5 +16,12 @@ jobs:
         with:
           repository: physwizz/A356e.git #Replace with your repo
           ref: main # Replace with your branch
+      - name: Setup Build Environment
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential git flex bison libssl-dev libelf-dev \
+                            python3-pip libxml2-utils bc cpio rsync zip unzip
+      - name: make script file executable 
+        run: chmod +x build_kernel.sh
       - name: Run script file
         run: ./build_kernel.sh
