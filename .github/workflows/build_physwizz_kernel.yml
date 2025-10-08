@@ -17,4 +17,9 @@ jobs:
      run: chmod +x build_kernel.sh
      
    - name: Run script file
-     run: ./build_kernel.sh
+     run: sudo apt update
+        sudo apt -y upgrade
+        sudo apt -y install python-is-python3 build-essential openssl pip python3-virtualenv python2.7 openssl
+        sudo apt-get -y install git-all aptitude make gcc libtinfo5
+        sudo aptitude -y install libssl-dev
+        ./build_kernel.sh
