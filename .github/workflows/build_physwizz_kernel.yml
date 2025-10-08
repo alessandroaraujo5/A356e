@@ -23,7 +23,7 @@ jobs:
    - name: Install python etc
      run: sudo apt -y install python-is-python3 build-essential openssl pip python3-virtualenv openssl
    - name: Install git
-     run: sudo apt-get -y install git-all aptitude make gcc libtinfo5
+     run: sudo apt-get -y install git-all aptitude make gcc
    - name: Install libssl
      run: sudo aptitude -y install libssl-dev
    - name: Run script file
