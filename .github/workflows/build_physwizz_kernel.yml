@@ -21,7 +21,7 @@ jobs:
    - name: Run upgrade
      run: sudo apt -y upgrade
    - name: Install python etc
-     run: sudo apt -y install python-is-python3 build-essential openssl pip python3-virtualenv python2.7 openssl
+     run: sudo apt -y install python-is-python3 build-essential openssl pip python3-virtualenv openssl
    - name: Install git
      run: sudo apt-get -y install git-all aptitude make gcc libtinfo5
    - name: Install libssl
