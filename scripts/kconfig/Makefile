@@ -10,7 +10,7 @@ Kconfig := Kconfig
 endif
 
 ifndef KBUILD_DEFCONFIG
-KBUILD_DEFCONFIG := defconfig
+KBUILD_DEFCONFIG := s5e8835-a35xjvxx_defconfig
 endif
 
 ifeq ($(quiet),silent_)
